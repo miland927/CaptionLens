@@ -30,6 +30,8 @@ class OcrUnavailableError(RuntimeError):
 
 _PS_OCR_SCRIPT = r"""
 param([string]$imgPath, [string]$lang)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+$OutputEncoding = [System.Text.UTF8Encoding]::new()
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 $null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType=WindowsRuntime]
 $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType=WindowsRuntime]
@@ -56,14 +58,14 @@ class WindowsPowerShellOcr:
     name = "windows-ocr-powershell"
 
     def __init__(self, language: str) -> None:
-        self.language = language
+        self.language = _windows_ocr_language(language)
         handle = tempfile.NamedTemporaryFile("w", suffix=".ps1", delete=False, encoding="utf-8")
         handle.write(_PS_OCR_SCRIPT)
         handle.close()
         self._script_path = Path(handle.name)
 
     def recognize(self, image: Image.Image) -> str:
-        prepared = preprocess_for_ocr(image)
+        prepared = preprocess_for_windows_ocr(image)
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
             image_path = Path(handle.name)
         try:
@@ -89,14 +91,13 @@ class WindowsPowerShellOcr:
                     self.language,
                 ],
                 capture_output=True,
-                text=True,
                 timeout=8,
                 startupinfo=startupinfo,
                 creationflags=creationflags,
             )
             if result.returncode != 0:
-                raise RuntimeError(result.stderr.strip() or "Windows OCR failed")
-            return result.stdout.strip()
+                raise RuntimeError(_decode_process_output(result.stderr).strip() or "Windows OCR failed")
+            return _decode_process_output(result.stdout).strip()
         finally:
             image_path.unlink(missing_ok=True)
 
@@ -116,6 +117,66 @@ class RapidOcrBackend:
         return "\n".join(str(item[1]) for item in result if len(item) >= 2)
 
 
+def _decode_process_output(data: bytes) -> str:
+    candidates = []
+    for encoding in ("utf-8-sig", "cp932", "utf-16", "utf-16le", "mbcs"):
+        try:
+            text = data.decode(encoding, errors="replace")
+        except LookupError:
+            continue
+        candidates.append((_japanese_score(text), text))
+    if not candidates:
+        return data.decode(errors="replace")
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def _japanese_score(text: str) -> int:
+    score = 0
+    for char in text:
+        if "\u3040" <= char <= "\u30ff" or "\u4e00" <= char <= "\u9fff":
+            score += 3
+        elif char == "\ufffd":
+            score -= 5
+        elif char.isprintable():
+            score += 1
+    return score
+
+
+def _looks_like_garbage(text: str) -> bool:
+    chars = [char for char in text if not char.isspace()]
+    if not chars:
+        return False
+    replacement_count = text.count("\ufffd")
+    japanese_count = sum(1 for char in chars if "\u3040" <= char <= "\u30ff" or "\u4e00" <= char <= "\u9fff")
+    return replacement_count >= 3 and replacement_count > japanese_count
+
+
+def _ocr_text_quality_score(text: str) -> int:
+    score = 0
+    for char in text:
+        if "\u3040" <= char <= "\u30ff" or "\u4e00" <= char <= "\u9fff":
+            score += 4
+        elif char == "\ufffd":
+            score -= 8
+        elif "\u00c0" <= char <= "\u024f":
+            score -= 3
+        elif char.isprintable():
+            score += 1
+    return score
+
+
+def _windows_ocr_language(language: str) -> str:
+    mapping = {
+        "ja": "ja-JP",
+        "jp": "ja-JP",
+        "en": "en-US",
+        "ko": "ko-KR",
+        "zh-cn": "zh-CN",
+        "zh-tw": "zh-TW",
+    }
+    return mapping.get(language.lower(), language)
+
+
 class EasyOcrBackend:
     name = "easyocr"
 
@@ -128,10 +189,24 @@ class EasyOcrBackend:
     def recognize(self, image: Image.Image) -> str:
         import numpy as np
 
-        result = self._reader.readtext(np.array(image.convert("RGB")), detail=0, paragraph=True)
-        if not result:
-            return ""
-        return "\n".join(str(line) for line in result)
+        best_text = ""
+        best_score = -10**9
+        for prepared in preprocess_variants_for_easyocr(image):
+            result = self._reader.readtext(
+                np.array(prepared),
+                detail=0,
+                paragraph=False,
+                decoder="greedy",
+                text_threshold=0.4,
+                low_text=0.2,
+                mag_ratio=1.5,
+            )
+            text = "\n".join(str(line) for line in result) if result else ""
+            score = _ocr_text_quality_score(text)
+            if score > best_score:
+                best_text = text
+                best_score = score
+        return best_text
 
 
 class NullOcr:
@@ -155,6 +230,9 @@ class FallbackOcrBackend:
                 text = backend.recognize(image).strip()
             except Exception as exc:
                 errors.append(f"{backend.name}: {exc}")
+                continue
+            if _looks_like_garbage(text):
+                errors.append(f"{backend.name}: 识别结果乱码")
                 continue
             if text:
                 self.name = backend.name
@@ -197,10 +275,44 @@ def preprocess_for_ocr(image: Image.Image) -> Image.Image:
     return gray.point(lambda p: 0 if p >= threshold else 255)
 
 
+def preprocess_for_windows_ocr(image: Image.Image) -> Image.Image:
+    rgb = image.convert("RGB")
+    w, h = rgb.size
+    if w < 1400:
+        scale = max(1, min(3, round(1400 / max(w, 1))))
+        rgb = rgb.resize((w * scale, h * scale), Image.LANCZOS)
+    gray = ImageOps.grayscale(rgb)
+    gray = ImageOps.autocontrast(gray, cutoff=1)
+    return gray.convert("RGB")
+
+
+def preprocess_for_easyocr(image: Image.Image) -> Image.Image:
+    return preprocess_variants_for_easyocr(image)[0]
+
+
+def preprocess_variants_for_easyocr(image: Image.Image) -> list[Image.Image]:
+    rgb = image.convert("RGB")
+    w, h = rgb.size
+    if h > 320:
+        rgb = rgb.crop((0, min(100, h // 4), w, h))
+        w, h = rgb.size
+
+    variants: list[Image.Image] = []
+    scale = 2 if w < 2200 else 1
+    scaled = rgb.resize((w * scale, h * scale), Image.LANCZOS) if scale > 1 else rgb
+    variants.append(scaled)
+    gray = ImageOps.grayscale(rgb)
+    gray = ImageOps.autocontrast(gray, cutoff=1)
+    gray_rgb = gray.resize((w * scale, h * scale), Image.LANCZOS).convert("RGB") if scale > 1 else gray.convert("RGB")
+    variants.append(gray_rgb)
+    return variants
+
+
 def create_ocr_backend(language: str, provider: str = "auto") -> OcrBackend:
     if provider == "auto":
         backends: list[OcrBackend] = []
-        for candidate in ("windows", "easyocr", "rapidocr"):
+        candidates = ("windows", "easyocr", "rapidocr")
+        for candidate in candidates:
             backend = create_ocr_backend(language, candidate)
             if not isinstance(backend, NullOcr):
                 backends.append(backend)

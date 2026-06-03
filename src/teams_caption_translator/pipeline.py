@@ -26,6 +26,13 @@ class PipelineEvent:
     total_ms: float = 0.0
 
 
+@dataclass
+class CaptionEntry:
+    speaker: str
+    text: str
+    stable: bool = True
+
+
 class LatestQueue:
     def __init__(self) -> None:
         self._queue: Queue = Queue(maxsize=1)
@@ -125,10 +132,21 @@ class CaptionPipeline:
                 continue
             started = perf_counter()
             try:
-                text = normalize_text(backend.recognize(frame.image))
+                text = normalize_ocr_text(backend.recognize(frame.image))
                 ocr_ms = (perf_counter() - started) * 1000
                 if text and similarity(text, last_text) < 0.985:
                     last_text = text
+                    preview_entries = parse_caption_entries(text)
+                    preview_lines = [format_caption_entry(entry.speaker, entry.text) for entry in ([e for e in preview_entries if e.stable] or preview_entries)]
+                    if preview_lines:
+                        self.events.put(
+                            PipelineEvent(
+                                "ocr_text",
+                                raw_text="\n\n".join(preview_lines),
+                                detail=f"OCR: {backend.name}",
+                                ocr_ms=ocr_ms,
+                            )
+                        )
                     self._ocr_text.put((text, frame.timestamp, ocr_ms, backend.name))
                 elif not text:
                     now = monotonic()
@@ -148,34 +166,40 @@ class CaptionPipeline:
             self.events.put(PipelineEvent("error", detail=f"翻译器启动失败: {exc}"))
             return
         self.events.put(PipelineEvent("loading", detail=f"翻译器已就绪: {translator.provider}"))
-        recent = RecentTextCache()
+        recent = RecentTextCache(fuzzy_threshold=0.90)
         context: list[str] = []
         while not self._stop.is_set():
             try:
                 text, frame_timestamp, ocr_ms, ocr_engine = self._ocr_text.get(timeout=0.2)
             except Empty:
                 continue
-            if recent.seen(text):
-                continue
-            started = perf_counter()
-            try:
-                result = translator.translate(text, self.config.source_lang, self.config.target_lang, context)
-                translation_ms = (perf_counter() - started) * 1000
-                context.append(text)
-                context[:] = context[-5:]
-                self.events.put(
-                    PipelineEvent(
-                        "result",
-                        raw_text=text,
-                        translated_text=result.text,
-                        detail=f"OCR: {ocr_engine}; translator: {result.provider}",
-                        ocr_ms=ocr_ms,
-                        translation_ms=translation_ms,
-                        total_ms=(perf_counter() - frame_timestamp) * 1000,
+            entries = parse_caption_entries(text)
+            stable_entries = [entry for entry in entries if entry.stable]
+            for entry in stable_entries or entries:
+                normalized_entry = normalize_text(f"{entry.speaker}:{entry.text}")
+                if not entry.text or recent.seen(normalized_entry):
+                    continue
+                started = perf_counter()
+                try:
+                    result = translator.translate(entry.text, self.config.source_lang, self.config.target_lang, context)
+                    translation_ms = (perf_counter() - started) * 1000
+                    raw_line = format_caption_entry(entry.speaker, entry.text)
+                    translated_line = format_caption_entry(entry.speaker, result.text)
+                    context.append(entry.text)
+                    context[:] = context[-5:]
+                    self.events.put(
+                        PipelineEvent(
+                            "result",
+                            raw_text=raw_line,
+                            translated_text=translated_line,
+                            detail=f"OCR: {ocr_engine}; translator: {result.provider}",
+                            ocr_ms=ocr_ms,
+                            translation_ms=translation_ms,
+                            total_ms=(perf_counter() - frame_timestamp) * 1000,
+                        )
                     )
-                )
-            except Exception as exc:
-                self.events.put(PipelineEvent("error", raw_text=text, detail=f"Translation failed: {exc}"))
+                except Exception as exc:
+                    self.events.put(PipelineEvent("error", raw_text=entry.text, detail=f"Translation failed: {exc}"))
 
 
 def image_delta(a: Image.Image | None, b: Image.Image) -> float:
@@ -187,3 +211,86 @@ def image_delta(a: Image.Image | None, b: Image.Image) -> float:
     b_small = b.convert("L").resize((64, 36))
     diff = ImageChops.difference(a_small, b_small)
     return float(ImageStat.Stat(diff).mean[0])
+
+
+def parse_caption_entries(text: str) -> list[CaptionEntry]:
+    lines = [_clean_caption_line(line) for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    entries: list[CaptionEntry] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if "：" in line or ":" in line:
+            sep = "：" if "：" in line else ":"
+            left, right = line.split(sep, 1)
+            if left.strip() and right.strip():
+                entries.append(CaptionEntry(_clean_speaker(left), right.strip(), stable=True))
+                index += 1
+                continue
+
+        if not _looks_like_speaker(line):
+            index += 1
+            continue
+
+        speaker = _clean_speaker(line)
+        index += 1
+        content_lines: list[str] = []
+        while index < len(lines) and not _looks_like_speaker(lines[index]):
+            content_lines.append(lines[index])
+            index += 1
+        if content_lines:
+            content = " ".join(content_lines)
+            stable = index < len(lines) or _looks_complete_caption(content, len(content_lines))
+            entries.append(CaptionEntry(speaker, content, stable=stable))
+    return entries
+
+
+def normalize_ocr_text(text: str) -> str:
+    lines = [normalize_text(line) for line in (text or "").splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def format_caption_entry(speaker: str, text: str) -> str:
+    speaker = _clean_speaker(speaker) or "字幕"
+    return f"{speaker}：{text.strip()}"
+
+
+def _clean_caption_line(line: str) -> str:
+    line = line.strip()
+    noise = ("通話保留", "ミュート", "字幕", "Teams")
+    if any(token == line for token in noise):
+        return ""
+    if _looks_like_avatar_label(line):
+        return ""
+    return line
+
+
+def _clean_speaker(speaker: str) -> str:
+    return speaker.replace("*", "").strip(" -*\t")
+
+
+def _looks_like_speaker(line: str) -> bool:
+    if len(line) > 28:
+        return False
+    if _looks_like_avatar_label(line):
+        return False
+    if any(mark in line for mark in "。、，,！？!?「」()（）"):
+        return False
+    return any(char.isalpha() or "\u3040" <= char <= "\u30ff" or "\u4e00" <= char <= "\u9fff" for char in line)
+
+
+def _looks_like_avatar_label(line: str) -> bool:
+    if len(line) > 5:
+        return False
+    if line.endswith("F") and line[:-1].isdigit():
+        return True
+    return line.isupper() and line.isascii()
+
+
+def _looks_complete_caption(text: str, line_count: int) -> bool:
+    text = text.rstrip()
+    if text.endswith(("。", ".", "！", "!", "？", "?")):
+        return True
+    if line_count >= 2:
+        return True
+    return text.endswith(("です", "ます", "ですね", "ました", "でした"))

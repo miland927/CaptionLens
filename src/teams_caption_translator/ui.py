@@ -528,8 +528,8 @@ class TranslatorWindow:
     def _handle_event(self, event: PipelineEvent) -> None:
         if event.kind == "result":
             self.guide_frame.pack_forget()
-            self._set_text(self.raw_text, event.raw_text)
-            self._set_text(self.trans_text, event.translated_text)
+            self._append_text(self.raw_text, event.raw_text)
+            self._append_text(self.trans_text, event.translated_text)
             self._set_status("已翻译", event.detail, COLORS["ok"])
             self.metrics.configure(
                 text=f"OCR {event.ocr_ms:.0f} ms | 翻译 {event.translation_ms:.0f} ms | 总计 {event.total_ms:.0f} ms"
@@ -543,6 +543,11 @@ class TranslatorWindow:
             self._status_hold_until = monotonic() + 3.5
             self._set_status("等待字幕", event.detail or "等待字幕文字出现...", COLORS["warn"])
             self.metrics.configure(text=f"OCR {event.ocr_ms:.0f} ms | 未识别到文字")
+        elif event.kind == "ocr_text":
+            self.guide_frame.pack_forget()
+            self._set_text(self.raw_text, event.raw_text)
+            self._set_status("翻译中", event.detail or "OCR 已识别，正在翻译...", COLORS["warn"])
+            self.metrics.configure(text=f"OCR {event.ocr_ms:.0f} ms | 翻译中")
         elif event.kind == "capture":
             if monotonic() < self._status_hold_until:
                 return
@@ -557,6 +562,18 @@ class TranslatorWindow:
         widget.configure(state=tk.NORMAL)
         widget.delete("1.0", tk.END)
         widget.insert("1.0", value)
+        widget.see(tk.END)
+        widget.configure(state=tk.DISABLED)
+
+    def _append_text(self, widget: tk.Text, value: str) -> None:
+        value = value.strip()
+        if not value:
+            return
+        widget.configure(state=tk.NORMAL)
+        if widget.get("1.0", tk.END).strip():
+            widget.insert(tk.END, "\n\n")
+        widget.insert(tk.END, value)
+        widget.see(tk.END)
         widget.configure(state=tk.DISABLED)
 
     def _set_status(self, badge: str, detail: str, color: str) -> None:
