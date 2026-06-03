@@ -38,6 +38,7 @@ class AppConfig:
     show_raw: bool = True
     deepseek_api_key: str = ""
     ocr_provider: str = "auto"
+    max_translation_segments_per_batch: int = 2
 
 
 def _merge_dict(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:

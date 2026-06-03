@@ -53,6 +53,16 @@ $result = Await($engine.RecognizeAsync($bmp))
 $result.Text
 """
 
+_PS_OCR_CHECK_SCRIPT = r"""
+param([string]$lang)
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType=WindowsRuntime]
+$null = [Windows.Globalization.Language, Windows.Foundation, ContentType=WindowsRuntime]
+$langObj = [Windows.Globalization.Language]::new($lang)
+$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($langObj)
+if ($engine) { "OK" } else { "MISSING" }
+"""
+
 
 class WindowsPowerShellOcr:
     name = "windows-ocr-powershell"
@@ -91,7 +101,7 @@ class WindowsPowerShellOcr:
                     self.language,
                 ],
                 capture_output=True,
-                timeout=8,
+                timeout=5,
                 startupinfo=startupinfo,
                 creationflags=creationflags,
             )
@@ -100,6 +110,32 @@ class WindowsPowerShellOcr:
             return _decode_process_output(result.stdout).strip()
         finally:
             image_path.unlink(missing_ok=True)
+
+
+def windows_ocr_available(language: str) -> tuple[bool, str]:
+    if os.name != "nt":
+        return False, "Windows OCR 仅在 Windows 上可用"
+    lang = _windows_ocr_language(language)
+    script = _PS_OCR_CHECK_SCRIPT.replace("param([string]$lang)", f'$lang = "{lang}"')
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            capture_output=True,
+            timeout=6,
+        )
+    except Exception as exc:
+        return False, f"Windows OCR 检测失败：{exc}"
+    if result.returncode == 0 and "OK" in _decode_process_output(result.stdout):
+        return True, f"Windows OCR 可用：{lang}"
+    return False, f"Windows OCR 不可用：{lang}，建议使用 EasyOCR"
 
 
 class RapidOcrBackend:
@@ -199,7 +235,8 @@ class EasyOcrBackend:
                 decoder="greedy",
                 text_threshold=0.4,
                 low_text=0.2,
-                mag_ratio=1.5,
+                mag_ratio=1.0,
+                canvas_size=1600,
             )
             text = "\n".join(str(line) for line in result) if result else ""
             score = _ocr_text_quality_score(text)
@@ -293,17 +330,19 @@ def preprocess_for_easyocr(image: Image.Image) -> Image.Image:
 def preprocess_variants_for_easyocr(image: Image.Image) -> list[Image.Image]:
     rgb = image.convert("RGB")
     w, h = rgb.size
-    if h > 320:
-        rgb = rgb.crop((0, min(100, h // 4), w, h))
+    if h > 280:
+        rgb = rgb.crop((0, h - 280, w, h))
         w, h = rgb.size
 
     variants: list[Image.Image] = []
-    scale = 2 if w < 2200 else 1
-    scaled = rgb.resize((w * scale, h * scale), Image.LANCZOS) if scale > 1 else rgb
+    scale = min(2.0, 1200 / max(w, 1)) if w < 1200 else 1.0
+    scaled = rgb.resize((int(w * scale), int(h * scale)), Image.LANCZOS) if scale > 1 else rgb
     variants.append(scaled)
+    if os.environ.get("TCT_OCR_QUALITY") != "1":
+        return variants
     gray = ImageOps.grayscale(rgb)
     gray = ImageOps.autocontrast(gray, cutoff=1)
-    gray_rgb = gray.resize((w * scale, h * scale), Image.LANCZOS).convert("RGB") if scale > 1 else gray.convert("RGB")
+    gray_rgb = gray.resize((int(w * scale), int(h * scale)), Image.LANCZOS).convert("RGB") if scale > 1 else gray.convert("RGB")
     variants.append(gray_rgb)
     return variants
 
@@ -311,7 +350,9 @@ def preprocess_variants_for_easyocr(image: Image.Image) -> list[Image.Image]:
 def create_ocr_backend(language: str, provider: str = "auto") -> OcrBackend:
     if provider == "auto":
         backends: list[OcrBackend] = []
-        candidates = ("windows", "easyocr", "rapidocr")
+        # Windows OCR currently starts a PowerShell process for each frame; it is
+        # reliable but too slow for live Teams captions. Prefer EasyOCR for auto.
+        candidates = ("easyocr", "windows", "rapidocr")
         for candidate in candidates:
             backend = create_ocr_backend(language, candidate)
             if not isinstance(backend, NullOcr):

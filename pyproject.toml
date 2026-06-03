@@ -1,7 +1,7 @@
 [project]
 name = "teams-caption-translator"
-version = "0.1.0"
-description = "Low-latency Teams caption OCR translator MVP for Windows."
+version = "0.2.0"
+description = "Teams caption OCR translator with DeepSeek, diagnostics, and a dedicated Windows venv launcher."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

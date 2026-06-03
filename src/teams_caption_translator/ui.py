@@ -10,9 +10,10 @@ from tkinter import ttk
 
 from .capture import create_capture_backend
 from .config import AppConfig, Region, save_config
-from .ocr import create_ocr_backend
+from .ocr import create_ocr_backend, windows_ocr_available
 from .pipeline import CaptionPipeline, PipelineEvent
 from .text_utils import normalize_text
+from .translator import create_translator
 
 
 FONT_UI = "Microsoft YaHei UI"
@@ -131,6 +132,7 @@ class TranslatorWindow:
 
         self._build()
         self._refresh_region()
+        self.root.after(800, self._show_ocr_recommendation)
         if self.config.auto_start and self.config.region.is_ready:
             self.root.after(400, self.start)
 
@@ -222,6 +224,8 @@ class TranslatorWindow:
             font=(FONT_MONO, 10),
         )
         self.key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8), pady=8)
+        self.deepseek_test_btn = self._button(api_settings, "测试 DeepSeek", self.test_deepseek_once, "#263142", COLORS["soft"])
+        self.deepseek_test_btn.pack(side=tk.LEFT, padx=(0, 8), pady=8)
         self.save_settings_btn = self._button(api_settings, "保存设置", self.save_settings, "#263142", COLORS["soft"])
         self.save_settings_btn.pack(side=tk.LEFT, padx=(0, 10), pady=8)
 
@@ -263,7 +267,7 @@ class TranslatorWindow:
             font=(FONT_UI, 10),
         ).pack(anchor=tk.W, padx=10, pady=(0, 8))
 
-        self.raw_frame, self.raw_text = self._text_panel(shell, "日语原文", COLORS["warn"], 3, False)
+        self.raw_frame, self.raw_text = self._text_panel(shell, "当前 OCR 原文", COLORS["warn"], 3, False)
         self.trans_frame, self.trans_text = self._text_panel(shell, "中文翻译", COLORS["accent"], 6, True)
 
         footer = tk.Frame(shell, bg=COLORS["bg"])
@@ -409,6 +413,42 @@ class TranslatorWindow:
         self._refresh_region()
         self._set_status("已设置", "已使用屏幕底部推荐字幕区，请先点击“测试OCR”。", COLORS["ok"])
 
+    def _show_ocr_recommendation(self) -> None:
+        if self.pipeline or self.config.ocr_provider != "auto":
+            return
+        Thread(target=self._ocr_recommendation_worker, daemon=True).start()
+
+    def _ocr_recommendation_worker(self) -> None:
+        ok, message = windows_ocr_available(self.config.ocr_lang)
+        if self.pipeline:
+            return
+        detail = f"当前 OCR 引擎为 auto：实时优先 EasyOCR；{message}"
+        color = COLORS["ok"] if ok else COLORS["warn"]
+        self.root.after(0, lambda: self._set_status("OCR 推荐", detail, color))
+
+    def test_deepseek_once(self) -> None:
+        self.save_settings(silent=True)
+        if not self.config.deepseek_api_key.strip():
+            self._set_status("缺少 Key", "请先输入 DeepSeek API Key。", COLORS["warn"])
+            self.key_entry.focus_set()
+            return
+        self.deepseek_test_btn.configure(state=tk.DISABLED)
+        self._set_status("测试中", "正在测试 DeepSeek API Key 和网络连接...", COLORS["warn"])
+        Thread(target=self._test_deepseek_worker, daemon=True).start()
+
+    def _test_deepseek_worker(self) -> None:
+        try:
+            translator = create_translator("deepseek", self.config.deepseek_api_key)
+            result = translator.translate("こんにちは。", "ja", self.config.target_lang, [])
+            message = f"DeepSeek 可用，测试翻译：{result.text}"
+            self.root.after(0, lambda: self._finish_deepseek_test(message, True))
+        except Exception as exc:
+            self.root.after(0, lambda: self._finish_deepseek_test(f"DeepSeek 测试失败：{exc}", False))
+
+    def _finish_deepseek_test(self, message: str, ok: bool) -> None:
+        self.deepseek_test_btn.configure(state=tk.NORMAL)
+        self._set_status("DeepSeek 正常" if ok else "DeepSeek 错误", message, COLORS["ok"] if ok else COLORS["danger"])
+
     def test_ocr_once(self) -> None:
         if not self.config.region.is_ready:
             self._set_status("待选区", "请先选择字幕区域，再测试 OCR。", COLORS["warn"])
@@ -474,7 +514,7 @@ class TranslatorWindow:
         self.pipeline.start()
         self.start_btn.configure(text="停止翻译", bg=COLORS["danger"])
         self.select_btn.configure(state=tk.DISABLED)
-        self._set_status("运行中", "正在捕获字幕区域...", COLORS["ok"])
+        self._set_status("截图中", "正在捕获字幕区域，等待画面稳定...", COLORS["ok"])
         self.root.after(80, self._poll_events)
 
     def _move_window_away_from_region(self) -> None:
@@ -551,7 +591,7 @@ class TranslatorWindow:
         elif event.kind == "capture":
             if monotonic() < self._status_hold_until:
                 return
-            self._set_status("截图中", event.detail, COLORS["soft"])
+            self._set_status("截图正常", event.detail, COLORS["soft"])
         elif event.kind == "loading":
             self._set_status("加载中", event.detail, COLORS["warn"])
         elif event.kind == "error":

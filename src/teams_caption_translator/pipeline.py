@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from queue import Empty, Queue
 from threading import Event, Thread
 from time import monotonic, perf_counter, sleep
@@ -85,7 +86,8 @@ class CaptionPipeline:
         last_emit = 0.0
         last_status = 0.0
         min_interval = 1.0 / max(self.config.capture_fps, 1)
-        min_ocr_interval = 0.9
+        min_ocr_interval = 0.45
+        required_stable_frames = max(1, min(self.config.stable_frames, 2))
         try:
             while not self._stop.is_set():
                 tick = perf_counter()
@@ -97,7 +99,7 @@ class CaptionPipeline:
                 else:
                     stable_count += 1
 
-                if stable_count >= self.config.stable_frames and monotonic() - last_emit > min_ocr_interval:
+                if stable_count >= required_stable_frames and monotonic() - last_emit > min_ocr_interval:
                     self._frames.put(frame)
                     last_emit = monotonic()
 
@@ -143,7 +145,7 @@ class CaptionPipeline:
                             PipelineEvent(
                                 "ocr_text",
                                 raw_text="\n\n".join(preview_lines),
-                                detail=f"OCR: {backend.name}",
+                                detail=f"OCR 识别到文本：{backend.name}",
                                 ocr_ms=ocr_ms,
                             )
                         )
@@ -152,7 +154,7 @@ class CaptionPipeline:
                     now = monotonic()
                     if now - last_empty_notice > 2.0:
                         last_empty_notice = now
-                        self.events.put(PipelineEvent("empty", detail=f"OCR engine: {backend.name}", ocr_ms=ocr_ms))
+                        self.events.put(PipelineEvent("empty", detail=f"OCR 未识别到文字：{backend.name}", ocr_ms=ocr_ms))
             except Exception as exc:
                 now = monotonic()
                 if now - last_error_notice > 2.0:
@@ -166,7 +168,7 @@ class CaptionPipeline:
             self.events.put(PipelineEvent("error", detail=f"翻译器启动失败: {exc}"))
             return
         self.events.put(PipelineEvent("loading", detail=f"翻译器已就绪: {translator.provider}"))
-        recent = RecentTextCache(fuzzy_threshold=0.90)
+        recent = RecentTextCache(fuzzy_threshold=0.92)
         context: list[str] = []
         while not self._stop.is_set():
             try:
@@ -175,31 +177,35 @@ class CaptionPipeline:
                 continue
             entries = parse_caption_entries(text)
             stable_entries = [entry for entry in entries if entry.stable]
-            for entry in stable_entries or entries:
-                normalized_entry = normalize_text(f"{entry.speaker}:{entry.text}")
-                if not entry.text or recent.seen(normalized_entry):
-                    continue
-                started = perf_counter()
-                try:
-                    result = translator.translate(entry.text, self.config.source_lang, self.config.target_lang, context)
-                    translation_ms = (perf_counter() - started) * 1000
-                    raw_line = format_caption_entry(entry.speaker, entry.text)
-                    translated_line = format_caption_entry(entry.speaker, result.text)
-                    context.append(entry.text)
-                    context[:] = context[-5:]
-                    self.events.put(
-                        PipelineEvent(
-                            "result",
-                            raw_text=raw_line,
-                            translated_text=translated_line,
-                            detail=f"OCR: {ocr_engine}; translator: {result.provider}",
-                            ocr_ms=ocr_ms,
-                            translation_ms=translation_ms,
-                            total_ms=(perf_counter() - frame_timestamp) * 1000,
+            for entry, segment in latest_caption_segments(
+                stable_entries or entries,
+                max_segments=self.config.max_translation_segments_per_batch,
+            ):
+                    normalized_entry = normalize_text(f"{entry.speaker}:{segment}")
+                    if not segment or recent.seen(normalized_entry):
+                        continue
+                    started = perf_counter()
+                    try:
+                        result = translator.translate(segment, self.config.source_lang, self.config.target_lang, context)
+                        translation_ms = (perf_counter() - started) * 1000
+                        raw_line = format_caption_entry(entry.speaker, segment)
+                        translated_line = format_caption_entry(entry.speaker, result.text)
+                        context.append(segment)
+                        context[:] = context[-5:]
+                        self.events.put(
+                            PipelineEvent(
+                                "result",
+                                raw_text=raw_line,
+                                translated_text=translated_line,
+                                detail=f"翻译完成：OCR {ocr_engine}；翻译器 {result.provider}",
+                                ocr_ms=ocr_ms,
+                                translation_ms=translation_ms,
+                                total_ms=(perf_counter() - frame_timestamp) * 1000,
+                            )
                         )
-                    )
-                except Exception as exc:
-                    self.events.put(PipelineEvent("error", raw_text=entry.text, detail=f"Translation failed: {exc}"))
+                    except Exception as exc:
+                        self.events.put(PipelineEvent("error", raw_text=segment, detail=f"翻译失败: {exc}"))
+                    continue
 
 
 def image_delta(a: Image.Image | None, b: Image.Image) -> float:
@@ -253,6 +259,42 @@ def normalize_ocr_text(text: str) -> str:
 def format_caption_entry(speaker: str, text: str) -> str:
     speaker = _clean_speaker(speaker) or "字幕"
     return f"{speaker}：{text.strip()}"
+
+
+def split_caption_segments(text: str) -> list[str]:
+    text = normalize_text(text)
+    if not text:
+        return []
+    parts = re.findall(r".+?(?:[。.!！？?]|$)", text)
+    segments = [part.strip() for part in parts if part.strip()]
+    if len(segments) <= 1:
+        return segments
+
+    merged: list[str] = []
+    buffer = ""
+    for segment in segments:
+        candidate = f"{buffer} {segment}".strip() if buffer else segment
+        if len(candidate) < 12 and not candidate.endswith(("。", ".", "！", "!", "？", "?")):
+            buffer = candidate
+            continue
+        merged.append(candidate)
+        buffer = ""
+    if buffer:
+        if merged:
+            merged[-1] = f"{merged[-1]} {buffer}"
+        else:
+            merged.append(buffer)
+    return merged
+
+
+def latest_caption_segments(entries: list[CaptionEntry], max_segments: int = 2) -> list[tuple[CaptionEntry, str]]:
+    candidates: list[tuple[CaptionEntry, str]] = []
+    for entry in entries:
+        for segment in split_caption_segments(entry.text):
+            if segment:
+                candidates.append((entry, segment))
+    limit = max(1, max_segments)
+    return candidates[-limit:]
 
 
 def _clean_caption_line(line: str) -> str:

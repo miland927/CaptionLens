@@ -15,7 +15,8 @@ APP_LOG = LOG_DIR / "app.log"
 def write_log(message: str) -> None:
     LOG_DIR.mkdir(exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    APP_LOG.write_text(f"[{timestamp}] {message}\n", encoding="utf-8")
+    with APP_LOG.open("a", encoding="utf-8") as handle:
+        handle.write(f"[{timestamp}] {message}\n")
 
 
 def show_error(message: str) -> None:
@@ -28,11 +29,12 @@ def show_error(message: str) -> None:
         messagebox.showerror("Teams 字幕翻译器启动失败", message)
         root.destroy()
     except Exception:
-        return None
+        print(message, file=sys.stderr)
 
 
 def main() -> int:
     sys.path.insert(0, str(APP_ROOT / "src"))
+    os.environ.setdefault("PYTHONUTF8", "1")
     try:
         if "--smoke" in sys.argv or os.environ.get("TCT_SMOKE") == "1":
             from teams_caption_translator.dpi import enable_dpi_awareness
@@ -49,12 +51,13 @@ def main() -> int:
 
         from teams_caption_translator.main import main as app_main
 
+        write_log("App starting")
         return app_main()
     except Exception:
         LOG_DIR.mkdir(exist_ok=True)
         traceback_text = traceback.format_exc()
         APP_LOG.write_text(traceback_text, encoding="utf-8")
-        show_error(f"程序启动失败，错误日志已保存到:\n{APP_LOG}")
+        show_error(f"程序启动失败，错误日志已保存到：\n{APP_LOG}")
         return 1
 
 
