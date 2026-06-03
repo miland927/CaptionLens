@@ -1,0 +1,21 @@
+{
+  "region": {
+    "x": null,
+    "y": null,
+    "w": null,
+    "h": null
+  },
+  "capture_fps": 10,
+  "stable_frames": 3,
+  "change_threshold": 3.5,
+  "source_lang": "ja",
+  "target_lang": "zh-CN",
+  "ocr_lang": "ja",
+  "translator": "deepseek",
+  "window_opacity": 0.88,
+  "window_always_top": true,
+  "auto_start": false,
+  "show_raw": true,
+  "deepseek_api_key": "",
+  "ocr_provider": "auto"
+}
