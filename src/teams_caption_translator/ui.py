@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 from queue import Empty
 from threading import Thread
 from time import monotonic, sleep
@@ -10,8 +9,9 @@ from tkinter import ttk
 
 from .capture import create_capture_backend
 from .config import AppConfig, Region, save_config
-from .ocr import create_ocr_backend, windows_ocr_available
+from .ocr import create_ocr_backend, prepare_ocr_backend, windows_ocr_available
 from .pipeline import CaptionPipeline, PipelineEvent
+from .runtime_paths import app_debug_dir
 from .text_utils import normalize_text
 from .translator import create_translator
 
@@ -35,8 +35,7 @@ COLORS = {
     "danger": "#ff6b6b",
 }
 
-APP_ROOT = Path(__file__).resolve().parents[2]
-DEBUG_DIR = APP_ROOT / "logs" / "debug"
+DEBUG_DIR = app_debug_dir()
 
 
 class RegionSelector:
@@ -132,6 +131,7 @@ class TranslatorWindow:
 
         self._build()
         self._refresh_region()
+        self._show_first_run_hint()
         self.root.after(800, self._show_ocr_recommendation)
         if self.config.auto_start and self.config.region.is_ready:
             self.root.after(400, self.start)
@@ -175,7 +175,7 @@ class TranslatorWindow:
 
         controls = tk.Frame(shell, bg=COLORS["panel"], highlightbackground=COLORS["line"], highlightthickness=1)
         controls.pack(fill=tk.X, pady=(0, 10))
-        controls.columnconfigure(5, weight=1)
+        controls.columnconfigure(6, weight=1)
 
         self.start_btn = self._button(controls, "开始翻译", self.toggle, COLORS["accent_2"], "#ffffff")
         self.start_btn.grid(row=0, column=0, padx=(10, 6), pady=10, sticky="w")
@@ -185,8 +185,10 @@ class TranslatorWindow:
         self.auto_region_btn.grid(row=0, column=2, padx=6, pady=10, sticky="w")
         self.test_btn = self._button(controls, "测试OCR", self.test_ocr_once, "#263142", COLORS["soft"])
         self.test_btn.grid(row=0, column=3, padx=6, pady=10, sticky="w")
+        self.prepare_ocr_btn = self._button(controls, "准备OCR", self.prepare_ocr_once, "#263142", COLORS["soft"])
+        self.prepare_ocr_btn.grid(row=0, column=4, padx=6, pady=10, sticky="w")
         self.clear_btn = self._button(controls, "清空", self.clear, "#263142", COLORS["soft"])
-        self.clear_btn.grid(row=0, column=4, padx=6, pady=10, sticky="w")
+        self.clear_btn.grid(row=0, column=5, padx=6, pady=10, sticky="w")
 
         self.region_label = tk.Label(
             controls,
@@ -196,7 +198,7 @@ class TranslatorWindow:
             anchor="e",
             font=(FONT_MONO, 9),
         )
-        self.region_label.grid(row=0, column=5, padx=(8, 10), pady=10, sticky="ew")
+        self.region_label.grid(row=0, column=6, padx=(8, 10), pady=10, sticky="ew")
 
         settings = tk.Frame(shell, bg=COLORS["bg"])
         settings.pack(fill=tk.X, pady=(0, 10))
@@ -261,10 +263,12 @@ class TranslatorWindow:
         ).pack(anchor=tk.W, padx=10, pady=(8, 2))
         tk.Label(
             self.guide_frame,
-            text="1. 打开 Teams 字幕    2. 点“选择区域”框住字幕    3. 点“开始翻译”",
+            text="1. 粘贴 DeepSeek Key  2. 测试 DeepSeek  3. 准备 OCR  4. 框选字幕区域  5. 开始翻译",
             bg=COLORS["panel_2"],
             fg=COLORS["soft"],
             font=(FONT_UI, 10),
+            justify=tk.LEFT,
+            wraplength=640,
         ).pack(anchor=tk.W, padx=10, pady=(0, 8))
 
         self.raw_frame, self.raw_text = self._text_panel(shell, "当前 OCR 原文", COLORS["warn"], 3, False)
@@ -302,6 +306,18 @@ class TranslatorWindow:
             lightcolor=COLORS["bg"],
             darkcolor=COLORS["bg"],
         )
+
+    def _show_first_run_hint(self) -> None:
+        if self.config.translator == "deepseek" and not self.config.deepseek_api_key.strip():
+            self.root.after(
+                250,
+                lambda: self._set_status(
+                    "输入 Key",
+                    "先粘贴 DeepSeek API Key，点“测试 DeepSeek”。通过后再准备 OCR、选择字幕区域。",
+                    COLORS["warn"],
+                ),
+            )
+            self.root.after(300, self.key_entry.focus_set)
 
     def _button(self, parent: tk.Widget, text: str, command, bg: str, fg: str) -> tk.Button:
         button = tk.Button(
@@ -448,6 +464,23 @@ class TranslatorWindow:
     def _finish_deepseek_test(self, message: str, ok: bool) -> None:
         self.deepseek_test_btn.configure(state=tk.NORMAL)
         self._set_status("DeepSeek 正常" if ok else "DeepSeek 错误", message, COLORS["ok"] if ok else COLORS["danger"])
+
+    def prepare_ocr_once(self) -> None:
+        self.save_settings(silent=True)
+        self.prepare_ocr_btn.configure(state=tk.DISABLED)
+        self._set_status("准备OCR", "正在准备 OCR 引擎。首次使用 EasyOCR 可能需要下载模型，请稍等...", COLORS["warn"])
+        Thread(target=self._prepare_ocr_worker, daemon=True).start()
+
+    def _prepare_ocr_worker(self) -> None:
+        try:
+            result = prepare_ocr_backend(self.config.ocr_lang, self.config.ocr_provider)
+            self.root.after(0, lambda: self._finish_prepare_ocr(result.ok, result.message))
+        except Exception as exc:
+            self.root.after(0, lambda: self._finish_prepare_ocr(False, f"OCR 准备失败：{exc}"))
+
+    def _finish_prepare_ocr(self, ok: bool, message: str) -> None:
+        self.prepare_ocr_btn.configure(state=tk.NORMAL)
+        self._set_status("OCR 就绪" if ok else "OCR 未就绪", message, COLORS["ok"] if ok else COLORS["danger"])
 
     def test_ocr_once(self) -> None:
         if not self.config.region.is_ready:

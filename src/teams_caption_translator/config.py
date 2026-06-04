@@ -5,9 +5,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .runtime_paths import app_config_path, project_root
 
-APP_DIR = Path(__file__).resolve().parents[2]
-CONFIG_PATH = APP_DIR / "config.json"
+APP_DIR = project_root()
+LEGACY_CONFIG_PATH = APP_DIR / "config.json"
+CONFIG_PATH = app_config_path()
 
 
 @dataclass
@@ -53,16 +55,23 @@ def _merge_dict(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any
 
 def load_config(path: Path = CONFIG_PATH) -> AppConfig:
     default = asdict(AppConfig())
-    if not path.exists():
+    source_path = path
+    if not source_path.exists() and path == CONFIG_PATH and LEGACY_CONFIG_PATH.exists():
+        source_path = LEGACY_CONFIG_PATH
+    if not source_path.exists():
         return AppConfig()
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(source_path.read_text(encoding="utf-8"))
         data = _merge_dict(default, raw)
         data["region"] = Region(**data.get("region", {}))
-        return AppConfig(**data)
+        config = AppConfig(**data)
+        if source_path != path:
+            save_config(config, path)
+        return config
     except Exception:
         return AppConfig()
 
 
 def save_config(config: AppConfig, path: Path = CONFIG_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(asdict(config), ensure_ascii=False, indent=2), encoding="utf-8")

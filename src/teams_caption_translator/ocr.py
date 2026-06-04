@@ -9,12 +9,21 @@ from typing import Protocol
 
 from PIL import Image, ImageFilter, ImageOps
 
+from .runtime_paths import bundled_easyocr_model_dir
+
 
 @dataclass
 class OcrResult:
     text: str
     engine: str
     latency_ms: float
+
+
+@dataclass
+class OcrPreparation:
+    ok: bool
+    engine: str
+    message: str
 
 
 class OcrBackend(Protocol):
@@ -220,7 +229,9 @@ class EasyOcrBackend:
         import easyocr
 
         lang = "ja" if language.lower().startswith("ja") else language.split("-")[0].lower()
-        self._reader = easyocr.Reader([lang], gpu=False, download_enabled=False)
+        bundled_model_dir = bundled_easyocr_model_dir()
+        model_dir = str(bundled_model_dir) if bundled_model_dir.exists() else None
+        self._reader = easyocr.Reader([lang], gpu=False, model_storage_directory=model_dir, download_enabled=True)
 
     def recognize(self, image: Image.Image) -> str:
         import numpy as np
@@ -350,29 +361,64 @@ def preprocess_variants_for_easyocr(image: Image.Image) -> list[Image.Image]:
 def create_ocr_backend(language: str, provider: str = "auto") -> OcrBackend:
     if provider == "auto":
         backends: list[OcrBackend] = []
+        errors: list[str] = []
         # Windows OCR currently starts a PowerShell process for each frame; it is
         # reliable but too slow for live Teams captions. Prefer EasyOCR for auto.
         candidates = ("easyocr", "windows", "rapidocr")
         for candidate in candidates:
-            backend = create_ocr_backend(language, candidate)
-            if not isinstance(backend, NullOcr):
+            backend, message = _try_create_ocr_backend(language, candidate)
+            if backend is None:
+                errors.append(message)
+            else:
                 backends.append(backend)
-        return FallbackOcrBackend(backends) if backends else NullOcr()
+        if backends:
+            return FallbackOcrBackend(backends)
+        null = NullOcr()
+        null.reason = "；".join(errors)
+        return null
 
+    backend, message = _try_create_ocr_backend(language, provider)
+    if backend is not None:
+        return backend
+    null = NullOcr()
+    null.reason = message
+    return null
+
+
+def prepare_ocr_backend(language: str, provider: str = "auto") -> OcrPreparation:
+    if provider == "auto":
+        statuses = []
+        for candidate in ("easyocr", "windows", "rapidocr"):
+            backend, message = _try_create_ocr_backend(language, candidate)
+            if backend is not None:
+                return OcrPreparation(True, backend.name, f"OCR 已准备好：{backend.name}")
+            statuses.append(message)
+        return OcrPreparation(False, "no-ocr", "OCR 暂不可用：" + "；".join(statuses))
+
+    backend, message = _try_create_ocr_backend(language, provider)
+    if backend is not None:
+        return OcrPreparation(True, backend.name, f"OCR 已准备好：{backend.name}")
+    return OcrPreparation(False, "no-ocr", message)
+
+
+def _try_create_ocr_backend(language: str, provider: str) -> tuple[OcrBackend | None, str]:
     # Windows built-in OCR is zero-dependency and fast when the OCR language is installed.
     if provider == "windows":
+        ok, message = windows_ocr_available(language)
+        if not ok:
+            return None, message
         try:
-            return WindowsPowerShellOcr(language)
-        except Exception:
-            pass
+            return WindowsPowerShellOcr(language), message
+        except Exception as exc:
+            return None, f"Windows OCR 初始化失败：{exc}"
     if provider == "easyocr":
         try:
-            return EasyOcrBackend(language)
-        except Exception:
-            pass
+            return EasyOcrBackend(language), "EasyOCR 可用"
+        except Exception as exc:
+            return None, f"EasyOCR 初始化失败：{exc}"
     if provider == "rapidocr":
         try:
-            return RapidOcrBackend()
-        except Exception:
-            pass
-    return NullOcr()
+            return RapidOcrBackend(), "RapidOCR 可用"
+        except Exception as exc:
+            return None, f"RapidOCR 初始化失败：{exc}"
+    return None, f"未知 OCR 引擎：{provider}"

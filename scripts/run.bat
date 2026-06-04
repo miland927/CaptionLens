@@ -21,6 +21,26 @@ echo.
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 set "VENV_PYW=%VENV_DIR%\Scripts\pythonw.exe"
 
+set "VENV_BROKEN=0"
+if exist "%VENV_PY%" (
+  "%VENV_PY%" -c "import sys; print(sys.executable); print(sys.version)" >> "%RUN_LOG%" 2>&1
+  if errorlevel 1 (
+    set "VENV_BROKEN=1"
+    echo Existing .venv is broken and will be rebuilt. >> "%RUN_LOG%"
+    echo Existing .venv is broken and will be rebuilt.
+  )
+)
+
+if "%VENV_BROKEN%"=="1" (
+  if "%VENV_DIR%"=="%APP_ROOT%\.venv" (
+    rmdir /s /q "%VENV_DIR%" >> "%RUN_LOG%" 2>&1
+  ) else (
+    echo Refusing to remove unexpected venv path: %VENV_DIR% >> "%RUN_LOG%"
+    pause
+    exit /b 1
+  )
+)
+
 if not exist "%VENV_PY%" (
   echo Creating dedicated .venv for this project...
   echo Creating venv >> "%RUN_LOG%"
@@ -75,6 +95,12 @@ if errorlevel 1 (
 )
 
 if not exist "%VENV_PYW%" set "VENV_PYW=%VENV_PY%"
+
+if "%TCT_CHECK_ONLY%"=="1" (
+  echo Runtime check completed.
+  echo Runtime check completed. >> "%RUN_LOG%"
+  exit /b 0
+)
 
 echo Launching UI...
 echo Launching UI with %VENV_PYW% >> "%RUN_LOG%"

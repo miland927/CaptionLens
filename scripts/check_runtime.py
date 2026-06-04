@@ -19,7 +19,14 @@ REQUIRED_MODULES = {
 }
 
 APP_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = APP_ROOT / "config.json"
+SRC_DIR = APP_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from teams_caption_translator.runtime_paths import app_config_path
+
+CONFIG_PATH = app_config_path()
+LEGACY_CONFIG_PATH = APP_ROOT / "config.json"
 
 
 def has_module(module_name: str) -> bool:
@@ -27,10 +34,11 @@ def has_module(module_name: str) -> bool:
 
 
 def load_config() -> dict:
-    if not CONFIG_PATH.exists():
+    source_path = CONFIG_PATH if CONFIG_PATH.exists() else LEGACY_CONFIG_PATH
+    if not source_path.exists():
         return {}
     try:
-        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        return json.loads(source_path.read_text(encoding="utf-8"))
     except Exception:
         return {}
 

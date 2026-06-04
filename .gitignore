@@ -15,6 +15,9 @@ env/
 .ruff_cache/
 build/
 dist/
+installer/
+release/
 *.egg-info/
+TeamsCaptionTranslatorSetupStub.spec
 .DS_Store
 Thumbs.db
