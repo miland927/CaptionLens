@@ -14,6 +14,7 @@ dependencies = [
 [project.optional-dependencies]
 fast-capture = ["dxcam>=0.0.5"]
 rapidocr = ["rapidocr-onnxruntime>=1.3.24"]
+dev = ["pytest>=8.0.0"]
 
 [project.scripts]
 teams-caption-translator = "teams_caption_translator.main:main"

@@ -9,9 +9,24 @@ $Spec = Join-Path $Root "packaging\teams-caption-translator.spec"
 $InnoScript = Join-Path $Root "packaging\teams-caption-translator.iss"
 $OutputDir = Join-Path $Root "installer"
 
-if (-not (Test-Path $VenvPython)) {
-    Write-Host "Creating .venv via scripts\run.bat first..."
-    & (Join-Path $Root "scripts\run.bat")
+$RunScript = Join-Path $Root "scripts\run.bat"
+$needsRuntimeRepair = $true
+if (Test-Path $VenvPython) {
+    & $VenvPython -c "import sys" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $needsRuntimeRepair = $false
+    }
+}
+
+if ($needsRuntimeRepair) {
+    Write-Host "Preparing or repairing .venv via scripts\run.bat..."
+    $env:TCT_CHECK_ONLY = "1"
+    & $RunScript
+    $runExit = $LASTEXITCODE
+    Remove-Item Env:\TCT_CHECK_ONLY -ErrorAction SilentlyContinue
+    if ($runExit -ne 0) {
+        throw "Runtime preparation failed with exit code $runExit. Check logs\launcher.log."
+    }
 }
 
 if (-not (Test-Path $VenvPython)) {

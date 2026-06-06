@@ -1,0 +1,57 @@
+给 macOS 测试者的说明，可直接复制发送。
+
+请使用真实 Mac 测试这个工具。
+
+下载并打开：
+
+TeamsCaptionTranslator-v0.2.0-macos.dmg
+
+然后：
+
+1. 把 Teams Caption Translator.app 拖到 Applications。
+2. 如果 macOS 提示未签名应用，请右键 app，选择 Open。
+3. 打开 System Settings。
+4. 进入 Privacy & Security。
+5. 进入 Screen Recording。
+6. 勾选 Teams Caption Translator。
+7. 退出并重新打开 Teams Caption Translator。
+8. 输入你自己的 DeepSeek API Key。
+9. 点击 Test DeepSeek。
+10. 点击 Prepare OCR。
+11. 打开 Microsoft Teams 字幕。
+12. 点击 Select Region，框住字幕滚动区域。
+13. 点击 Test OCR。
+14. 点击 Start Translation。
+
+你不需要安装 Python，也不需要手动下载 OCR 模型。
+
+如果 OCR 没有文字，请先确认 Screen Recording 权限已经开启，并重启 app。
+
+请不要截图或发送 DeepSeek Key。
+Do not send your DeepSeek Key.
+
+如果测试失败，请在 release 文件夹里运行：
+
+./EXPORT_MACOS_SUPPORT_BUNDLE.sh
+
+然后把生成的 TeamsCaptionTranslatorSupport-*.zip 发给维护者。
+
+请同时告诉维护者这些结果：
+
+- macOS 版本
+- Mac CPU 类型：Apple Silicon 还是 Intel
+- 是否右键 Open 成功
+- 是否已开启 Screen Recording 权限
+- Test DeepSeek 是否成功
+- Prepare OCR 是否成功
+- Test OCR 是否识别到日语
+- Start Translation 是否出现中文翻译
+- 旧翻译是否保留
+- 新字幕是否按 `演讲者：内容` 追加
+- 是否能导出支持包
+
+也可以直接填写 release 文件夹里的 MAC_TEST_RESULT_TEMPLATE.txt。
+
+日志位置：
+
+~/Library/Application Support/TeamsCaptionTranslator/logs

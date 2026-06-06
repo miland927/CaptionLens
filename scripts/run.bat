@@ -112,8 +112,10 @@ set "BASE_PY="
 if "%BASE_PY%"=="" if exist "%LocalAppData%\Programs\Python\Python312\python.exe" set "BASE_PY=%LocalAppData%\Programs\Python\Python312\python.exe"
 if "%BASE_PY%"=="" if exist "%LocalAppData%\Programs\Python\Python311\python.exe" set "BASE_PY=%LocalAppData%\Programs\Python\Python311\python.exe"
 if "%BASE_PY%"=="" if exist "%LocalAppData%\Programs\Python\Python310\python.exe" set "BASE_PY=%LocalAppData%\Programs\Python\Python310\python.exe"
-if "%BASE_PY%"=="" if exist "%LocalAppData%\AstrBot\backend\python\python.exe" set "BASE_PY=%LocalAppData%\AstrBot\backend\python\python.exe"
-if "%BASE_PY%"=="" if exist "C:\Users\35538\AppData\Local\AstrBot\backend\python\python.exe" set "BASE_PY=C:\Users\35538\AppData\Local\AstrBot\backend\python\python.exe"
+if not "%BASE_PY%"=="" exit /b 0
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%APP_ROOT%\scripts\find_python.ps1" 2^>nul`) do (
+  if "!BASE_PY!"=="" set "BASE_PY=%%P"
+)
 if not "%BASE_PY%"=="" exit /b 0
 for /f "delims=" %%P in ('where py 2^>nul') do (
   if "!BASE_PY!"=="" set "BASE_PY=py"

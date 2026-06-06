@@ -41,6 +41,10 @@ class AppConfig:
     deepseek_api_key: str = ""
     ocr_provider: str = "auto"
     max_translation_segments_per_batch: int = 2
+    caption_stabilize_seconds: float = 1.0
+    caption_min_chars: int = 4
+    max_debug_screenshots: int = 30
+    max_debug_dir_mb: int = 100
 
 
 def _merge_dict(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:

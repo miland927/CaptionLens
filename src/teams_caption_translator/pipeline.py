@@ -8,6 +8,8 @@ from time import monotonic, perf_counter, sleep
 
 from PIL import Image, ImageChops, ImageStat
 
+from .caption_filter import filter_caption_entries, normalize_speaker_label
+from .caption_stabilizer import CaptionStabilizer
 from .capture import CapturedFrame, create_capture_backend
 from .config import AppConfig
 from .ocr import create_ocr_backend
@@ -139,6 +141,7 @@ class CaptionPipeline:
                 if text and similarity(text, last_text) < 0.985:
                     last_text = text
                     preview_entries = parse_caption_entries(text)
+                    preview_entries = filter_caption_entries(preview_entries)
                     preview_lines = [format_caption_entry(entry.speaker, entry.text) for entry in ([e for e in preview_entries if e.stable] or preview_entries)]
                     if preview_lines:
                         self.events.put(
@@ -169,6 +172,10 @@ class CaptionPipeline:
             return
         self.events.put(PipelineEvent("loading", detail=f"翻译器已就绪: {translator.provider}"))
         recent = RecentTextCache(fuzzy_threshold=0.92)
+        stabilizer = CaptionStabilizer(
+            hold_seconds=self.config.caption_stabilize_seconds,
+            min_chars=self.config.caption_min_chars,
+        )
         context: list[str] = []
         while not self._stop.is_set():
             try:
@@ -176,21 +183,21 @@ class CaptionPipeline:
             except Empty:
                 continue
             entries = parse_caption_entries(text)
+            entries = filter_caption_entries(entries)
             stable_entries = [entry for entry in entries if entry.stable]
-            for entry, segment in latest_caption_segments(
-                stable_entries or entries,
-                max_segments=self.config.max_translation_segments_per_batch,
-            ):
-                    normalized_entry = normalize_text(f"{entry.speaker}:{segment}")
-                    if not segment or recent.seen(normalized_entry):
+            ready_captions = stabilizer.update(stable_entries or entries, frame_timestamp, ocr_ms, ocr_engine)
+            limit = max(1, self.config.max_translation_segments_per_batch)
+            for caption in ready_captions[-limit:]:
+                    normalized_entry = normalize_text(f"{caption.speaker}:{caption.text}")
+                    if not caption.text or recent.seen(normalized_entry):
                         continue
                     started = perf_counter()
                     try:
-                        result = translator.translate(segment, self.config.source_lang, self.config.target_lang, context)
+                        result = translator.translate(caption.text, self.config.source_lang, self.config.target_lang, context)
                         translation_ms = (perf_counter() - started) * 1000
-                        raw_line = format_caption_entry(entry.speaker, segment)
-                        translated_line = format_caption_entry(entry.speaker, result.text)
-                        context.append(segment)
+                        raw_line = format_caption_entry(caption.speaker, caption.text)
+                        translated_line = format_caption_entry(caption.speaker, result.text)
+                        context.append(caption.text)
                         context[:] = context[-5:]
                         self.events.put(
                             PipelineEvent(
@@ -198,13 +205,13 @@ class CaptionPipeline:
                                 raw_text=raw_line,
                                 translated_text=translated_line,
                                 detail=f"翻译完成：OCR {ocr_engine}；翻译器 {result.provider}",
-                                ocr_ms=ocr_ms,
+                                ocr_ms=caption.ocr_ms,
                                 translation_ms=translation_ms,
-                                total_ms=(perf_counter() - frame_timestamp) * 1000,
+                                total_ms=(perf_counter() - caption.frame_timestamp) * 1000,
                             )
                         )
                     except Exception as exc:
-                        self.events.put(PipelineEvent("error", raw_text=segment, detail=f"翻译失败: {exc}"))
+                        self.events.put(PipelineEvent("error", raw_text=caption.text, detail=f"翻译失败: {exc}"))
                     continue
 
 
@@ -308,10 +315,11 @@ def _clean_caption_line(line: str) -> str:
 
 
 def _clean_speaker(speaker: str) -> str:
-    return speaker.replace("*", "").strip(" -*\t")
+    return normalize_speaker_label(speaker)
 
 
 def _looks_like_speaker(line: str) -> bool:
+    line = _clean_speaker(line)
     if len(line) > 28:
         return False
     if _looks_like_avatar_label(line):

@@ -13,6 +13,8 @@ def app_base_dir() -> Path:
         root = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
         if root:
             return Path(root) / APP_NAME
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_NAME
     return Path.home() / f".{APP_NAME.lower()}"
 
 

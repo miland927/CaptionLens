@@ -36,6 +36,28 @@ def show_error(message: str) -> None:
 
 def main() -> int:
     try:
+        if os.environ.get("TCT_PLATFORM_DIAGNOSTIC_SMOKE") == "1":
+            from teams_caption_translator.platform_diagnostics import (
+                is_macos,
+                macos_screen_recording_hint,
+                platform_name,
+            )
+            from teams_caption_translator.runtime_paths import app_config_path
+
+            log_dir = app_log_dir()
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / "app.log"
+            lines = [
+                f"Platform diagnostic smoke: ok=True",
+                f"platform={platform_name()}",
+                f"config_path={app_config_path()}",
+                f"log_dir={log_dir}",
+            ]
+            if is_macos():
+                lines.append(f"macos_screen_recording_hint={macos_screen_recording_hint()}")
+            log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            return 0
+
         if os.environ.get("TCT_PREPARE_OCR_SMOKE") == "1":
             from teams_caption_translator.ocr import prepare_ocr_backend
 

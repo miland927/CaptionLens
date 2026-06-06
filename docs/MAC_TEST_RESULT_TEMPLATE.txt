@@ -1,0 +1,67 @@
+Teams Caption Translator v0.2.0 macOS Test Result
+
+Tester:
+Date:
+macOS version:
+Mac model:
+CPU type: Apple Silicon / Intel
+
+Package under test:
+TeamsCaptionTranslator-v0.2.0-macos.zip
+
+Release zip SHA256:
+
+DMG SHA256 from SHA256.txt:
+
+Installation
+
+[ ] The dmg opens.
+[ ] Teams Caption Translator.app can be copied to Applications.
+[ ] The app launches without installing Python.
+[ ] If unsigned warning appears, right-click Open works.
+
+Permissions
+
+[ ] Screen Recording permission can be granted.
+[ ] The app was restarted after permission was granted.
+
+DeepSeek
+
+[ ] DeepSeek API Key can be pasted and saved.
+[ ] Test DeepSeek succeeds.
+[ ] The tester did not send or screenshot the API key.
+
+OCR
+
+[ ] Prepare OCR succeeds.
+[ ] Select Region can select the Teams caption area.
+[ ] Test OCR saves a debug screenshot.
+[ ] Test OCR recognizes Japanese caption text.
+
+Real Teams Caption Translation
+
+[ ] Start Translation works in a real Teams meeting.
+[ ] Chinese translation appears.
+[ ] Old translated content remains visible.
+[ ] New subtitles append instead of replacing old content.
+[ ] New translated lines keep speaker/content formatting, for example:
+
+    speaker: translated content
+
+Support Bundle
+
+[ ] EXPORT_MACOS_SUPPORT_BUNDLE.sh runs from the release folder.
+[ ] The generated TeamsCaptionTranslatorSupport-*.zip exists.
+[ ] The support bundle does not expose the DeepSeek key.
+
+Observed Problems
+
+Write any error messages, slow steps, blank OCR results, missing permissions, or incorrect translations here:
+
+
+Final Result
+
+[ ] PASS: Ready for broader macOS distribution.
+[ ] FAIL: Needs fixes before macOS distribution.
+
+Tester notes:

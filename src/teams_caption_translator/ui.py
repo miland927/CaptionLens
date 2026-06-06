@@ -5,12 +5,15 @@ from queue import Empty
 from threading import Thread
 from time import monotonic, sleep
 import tkinter as tk
+from tkinter import messagebox
 from tkinter import ttk
 
 from .capture import create_capture_backend
 from .config import AppConfig, Region, save_config
+from .maintenance import prune_debug_screenshots, reset_app_data
 from .ocr import create_ocr_backend, prepare_ocr_backend, windows_ocr_available
 from .pipeline import CaptionPipeline, PipelineEvent
+from .platform_diagnostics import capture_failure_hint, is_macos, ocr_empty_hint
 from .runtime_paths import app_debug_dir
 from .text_utils import normalize_text
 from .translator import create_translator
@@ -175,7 +178,7 @@ class TranslatorWindow:
 
         controls = tk.Frame(shell, bg=COLORS["panel"], highlightbackground=COLORS["line"], highlightthickness=1)
         controls.pack(fill=tk.X, pady=(0, 10))
-        controls.columnconfigure(6, weight=1)
+        controls.columnconfigure(7, weight=1)
 
         self.start_btn = self._button(controls, "开始翻译", self.toggle, COLORS["accent_2"], "#ffffff")
         self.start_btn.grid(row=0, column=0, padx=(10, 6), pady=10, sticky="w")
@@ -189,6 +192,8 @@ class TranslatorWindow:
         self.prepare_ocr_btn.grid(row=0, column=4, padx=6, pady=10, sticky="w")
         self.clear_btn = self._button(controls, "清空", self.clear, "#263142", COLORS["soft"])
         self.clear_btn.grid(row=0, column=5, padx=6, pady=10, sticky="w")
+        self.reset_data_btn = self._button(controls, "重置数据", self.reset_app_data_confirm, "#263142", COLORS["soft"])
+        self.reset_data_btn.grid(row=0, column=6, padx=6, pady=10, sticky="w")
 
         self.region_label = tk.Label(
             controls,
@@ -198,7 +203,7 @@ class TranslatorWindow:
             anchor="e",
             font=(FONT_MONO, 9),
         )
-        self.region_label.grid(row=0, column=6, padx=(8, 10), pady=10, sticky="ew")
+        self.region_label.grid(row=0, column=7, padx=(8, 10), pady=10, sticky="ew")
 
         settings = tk.Frame(shell, bg=COLORS["bg"])
         settings.pack(fill=tk.X, pady=(0, 10))
@@ -263,7 +268,7 @@ class TranslatorWindow:
         ).pack(anchor=tk.W, padx=10, pady=(8, 2))
         tk.Label(
             self.guide_frame,
-            text="1. 粘贴 DeepSeek Key  2. 测试 DeepSeek  3. 准备 OCR  4. 框选字幕区域  5. 开始翻译",
+            text=self._first_run_guide_text(),
             bg=COLORS["panel_2"],
             fg=COLORS["soft"],
             font=(FONT_UI, 10),
@@ -309,15 +314,24 @@ class TranslatorWindow:
 
     def _show_first_run_hint(self) -> None:
         if self.config.translator == "deepseek" and not self.config.deepseek_api_key.strip():
+            detail = "先粘贴 DeepSeek API Key，点“测试 DeepSeek”。通过后再准备 OCR、选择字幕区域。"
+            if is_macos():
+                detail += " macOS 首次截图前还要允许屏幕录制权限。"
             self.root.after(
                 250,
                 lambda: self._set_status(
                     "输入 Key",
-                    "先粘贴 DeepSeek API Key，点“测试 DeepSeek”。通过后再准备 OCR、选择字幕区域。",
+                    detail,
                     COLORS["warn"],
                 ),
             )
             self.root.after(300, self.key_entry.focus_set)
+
+    def _first_run_guide_text(self) -> str:
+        text = "1. 粘贴 DeepSeek Key  2. 测试 DeepSeek  3. 准备 OCR  4. 框选字幕区域  5. 开始翻译"
+        if is_macos():
+            text += "\nmacOS: 如截图/OCR 为空，请在系统设置里允许 Screen Recording 后重启。"
+        return text
 
     def _button(self, parent: tk.Widget, text: str, command, bg: str, fg: str) -> tk.Button:
         button = tk.Button(
@@ -502,6 +516,7 @@ class TranslatorWindow:
             DEBUG_DIR.mkdir(parents=True, exist_ok=True)
             debug_path = DEBUG_DIR / f"ocr_region_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
             frame.image.save(debug_path)
+            prune_debug_screenshots(self.config.max_debug_screenshots, self.config.max_debug_dir_mb)
             ocr = create_ocr_backend(self.config.ocr_lang, self.config.ocr_provider)
             text = normalize_text(ocr.recognize(frame.image))
             if text:
@@ -511,12 +526,12 @@ class TranslatorWindow:
                     0,
                     lambda: self._finish_ocr_test(
                         "",
-                        f"OCR 没识别到文字。请打开截图确认里面是否有字幕：{debug_path}",
+                        f"OCR 没识别到文字。{ocr_empty_hint()} 截图：{debug_path}",
                         False,
                     ),
                 )
         except Exception as exc:
-            self.root.after(0, lambda: self._finish_ocr_test("", f"OCR 测试失败：{exc}", False))
+            self.root.after(0, lambda: self._finish_ocr_test("", f"OCR 测试失败：{exc}。{capture_failure_hint()}", False))
 
     def _finish_ocr_test(self, text: str, message: str, ok: bool) -> None:
         self.root.deiconify()
@@ -715,6 +730,34 @@ class TranslatorWindow:
         self.metrics.configure(text="延迟: -")
         if self.history_visible:
             self._refresh_history()
+
+    def reset_app_data_confirm(self) -> None:
+        if self.pipeline:
+            self.stop()
+        confirmed = messagebox.askyesno(
+            "重置应用数据",
+            "这会删除已保存的 DeepSeek Key、字幕区域、日志和 OCR 测试截图。\n\n确定要重置吗？",
+            parent=self.root,
+        )
+        if not confirmed:
+            return
+        removed_dir = reset_app_data()
+        self.config = AppConfig()
+        self.deepseek_key_var.set("")
+        self.translator_var.set(self.config.translator)
+        self.source_lang_var.set(self.config.source_lang)
+        self.target_lang_var.set(self.config.target_lang)
+        self.ocr_lang_var.set(self.config.ocr_lang)
+        self.ocr_provider_var.set(self.config.ocr_provider)
+        self.show_raw_var.set(self.config.show_raw)
+        self.topmost_var.set(self.config.window_always_top)
+        self.opacity_var.set(self.config.window_opacity)
+        self.root.attributes("-topmost", self.config.window_always_top)
+        self.root.attributes("-alpha", self.config.window_opacity)
+        self.clear()
+        self._refresh_region()
+        self._toggle_raw()
+        self._set_status("已重置", f"已删除用户数据：{removed_dir}", COLORS["ok"])
 
     def close(self) -> None:
         self.stop()

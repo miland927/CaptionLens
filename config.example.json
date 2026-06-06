@@ -17,5 +17,10 @@
   "auto_start": false,
   "show_raw": true,
   "deepseek_api_key": "",
-  "ocr_provider": "auto"
+  "ocr_provider": "auto",
+  "max_translation_segments_per_batch": 2,
+  "caption_stabilize_seconds": 1.0,
+  "caption_min_chars": 4,
+  "max_debug_screenshots": 30,
+  "max_debug_dir_mb": 100
 }
